@@ -14,6 +14,7 @@ RUN rm -rf /build
 ADD . /gopath/src/github.com/gtaylor/emdr-relay-go
 WORKDIR /gopath/src/github.com/gtaylor/emdr-relay-go
 RUN go get github.com/pebbe/zmq4
+RUN go get github.com/couchbase/go-couchbase
 
 CMD []
 EXPOSE 8050

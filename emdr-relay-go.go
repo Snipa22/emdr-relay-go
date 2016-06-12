@@ -1,14 +1,19 @@
 package main
 
 import (
-	cache "github.com/gtaylor/emdr-relay-go/cache"
+	"bytes"
+	"compress/zlib"
 	"fmt"
+	couchbase "github.com/couchbase/go-couchbase"
+	cache "github.com/gtaylor/emdr-relay-go/cache"
 	zmq "github.com/pebbe/zmq4"
 	"hash"
 	"hash/fnv"
-	"unsafe"
-	"time"
+	"io/ioutil"
+	"encoding/json"
 	"os"
+	"time"
+	"unsafe"
 )
 
 // The presence of the cache value is all we need, so keep this super simple.
@@ -16,7 +21,59 @@ type CacheValue struct {
 	found bool
 }
 
-// Calculate the size (in bytes) of our struct.
+type EMDRMsg struct {
+	ResultType string `json:"resultType"`
+	Version    string `json:"version"`
+	UploadKeys []struct {
+		Name string `json:"name"`
+		Key  string `json:"key"`
+	} `json:"uploadKeys"`
+	Generator struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	} `json:"generator"`
+	CurrentTime time.Time `json:"currentTime"`
+	Columns     []string  `json:"columns"`
+	Rowsets     []struct {
+		GeneratedAt time.Time `json:"generatedAt"`
+		RegionID    int       `json:"regionID"`
+		TypeID      int       `json:"typeID"`
+		Rows        []struct {
+			Num0  int       `json:"0"`
+			Num1  int       `json:"1"`
+			Num2  int       `json:"2"`
+			Num3  int64     `json:"3"`
+			Num4  int       `json:"4"`
+			Num5  int       `json:"5"`
+			Num6  bool      `json:"6"`
+			Num7  time.Time `json:"7"`
+			Num8  int       `json:"8"`
+			Num9  int       `json:"9"`
+			Num10 int       `json:"10"`
+		} `json:"rows"`
+	} `json:"rowsets"`
+}
+
+type Configuration struct {
+	URI            string   `json:"URI"`
+	Cluster        string   `json:"Cluster"`
+	Bucket         string   `json:"Bucket"`
+	RelayList      []string `json:"RelayList"`
+	CouchbaseCache bool     `json:"CouchbaseCache"`
+}
+
+type EMDRDoc struct {
+	Region     int `json:"region"`
+	ItemID     int `json:"ItemID"`
+	InsertTime int `json:"InsertTime"`
+	UploadKeys []struct {
+		Name string `json:"name"`
+		Key  string `json:"key"`
+	}
+	ResultType string `json:"resultType"`
+}
+
+//Calculate the size (in bytes) of our struct.
 const cache_value_size = int64(unsafe.Sizeof(CacheValue{}))
 
 // Determines the max cache size, in bytes.
@@ -35,7 +92,7 @@ func periodic_exiter() {
 	ticker := time.NewTicker(12 * 3600 * time.Second)
 	for {
 		select {
-		case <- ticker.C:
+		case <-ticker.C:
 			println("Exiting so we can auto-restart.")
 			os.Exit(0)
 		}
@@ -47,9 +104,19 @@ func main() {
 	println("Starting emdr-relay-go 1.1...")
 	cache := cache.NewLRUCache(cache_size_limit)
 
+	file, _ := os.Open("config.json")
+	decoder := json.NewDecoder(file)
+	configuration := Configuration{}
+	err := decoder.Decode(&configuration)
+	if err != nil {
+		fmt.Println("error:", err)
+	}
+
+	b, err := couchbase.GetBucket(configuration.URI, configuration.Cluster, configuration.Bucket)
 	receiver, _ := zmq.NewSocket(zmq.SUB)
-	receiver.Connect("tcp://master.eve-emdr.com:8050")
-	receiver.Connect("tcp://secondary.eve-emdr.com:8050")
+	for _, relay := range Configuration.RelayList {
+		receiver.Connect(relay)
+	}
 	receiver.SetSubscribe("")
 	defer receiver.Close()
 
@@ -94,5 +161,40 @@ func main() {
 		// A cache miss means that the incoming message is not a dupe.
 		// Send the message to subscribers.
 		sender.Send(msg, 0)
+		if Configuration.CouchbaseCache == false {
+			continue
+		}
+		var m EMDRMsg
+		decoded, err := ZlibDecode(msg)
+		if err != nil {
+			log.Fatal(err)
+		}
+		err := json.Unmarshal(decoded, &m)
+		for _, element := range m.Rowsets {
+			if element.GeneratedAt.Unix() >= int32(time.Now().Unix())-3600 {
+				val := EMDRDoc{element.RegionID, element.TypeID, int32(time.Now().Unix()), m.UploadKeys, m.ResultType}
+				var buffer bytes.Buffer
+				region_string, _ := strconv.Itoa(element.RegionID)
+				type_string, _ := strconv.Itoa(element.TypeID)
+				buffer.WriteString(region_string)
+				buffer.WriteString("-")
+				buffer.WriteString(type_string)
+				buffer.WriteString("-")
+				buffer.WriteString(m.ResultType)
+				b.Set(buffer.String(), val)
+			}
+		}
 	}
+}
+
+func ZlibDecode(encoded string) (decoded []byte, err error) {
+	b := bytes.NewBufferString(encoded)
+	pipeline, err := zlib.NewReader(b)
+
+	if err == nil {
+		defer pipeline.Close()
+		decoded, err = ioutil.ReadAll(pipeline)
+	}
+
+	return
 }

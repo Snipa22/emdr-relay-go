@@ -4,3 +4,4 @@
 *.out
 emdr-relay-go
 test.sh
+config.json

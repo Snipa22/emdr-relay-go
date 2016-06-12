@@ -1,0 +1,10 @@
+{
+  "URI": "http://bucket:password@host/",
+  "Cluster": "default",
+  "Bucket": "bucket",
+  "RelayList": [
+    "tcp://master.eve-emdr.com:8050",
+    "tcp://secondary.eve-emdr.com:8050"
+  ],
+  "CouchbaseCache": false
+}
